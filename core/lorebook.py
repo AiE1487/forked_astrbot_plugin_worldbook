@@ -10,6 +10,7 @@ from astrbot.api import logger
 from .config import PluginConfig
 from .entry import LoreEntry, Template
 from .lorefile import LoreFile
+from .schedule import normalize_schedule_dict
 
 
 class Lorebook:
@@ -55,7 +56,7 @@ class Lorebook:
             if item not in self.cfg.entry_storage:
                 self.cfg.entry_storage.append(item)
                 need_save = True
-            if entry.enabled_cron:
+            if entry.schedule_enabled:
                 need_emit = True
         if need_emit:
             self._emit_changed()
@@ -191,6 +192,17 @@ class Lorebook:
             duration = self._resolve(item, defaults, "duration", fallback=0)
             times = self._resolve(item, defaults, "times", fallback=0)
             probability = self._resolve(item, defaults, "probability", fallback=1.0)
+            inject_position = self._resolve(
+                item, defaults, "inject_position", fallback="default"
+            )
+            try:
+                cooldown = max(0, int(self._resolve(item, defaults, "cooldown", fallback=0) or 0))
+            except (TypeError, ValueError):
+                cooldown = 0
+            # 结构化定时：条目自带 > 模板默认；统一规范化
+            schedule = normalize_schedule_dict(
+                item.get("schedule") or defaults.get("schedule") or {}
+            )
             # priority 单独处理
             priority = self._resolve_priority(item, defaults)
 
@@ -207,6 +219,9 @@ class Lorebook:
                 "duration": duration,
                 "times": times,
                 "probability": probability,
+                "inject_position": inject_position,
+                "cooldown": cooldown,
+                "schedule": schedule,
                 "content": item["content"],
             }
             full_items.append(full_item)
@@ -276,6 +291,61 @@ class Lorebook:
         entry.set_priority(priority)
         self._save_config()
         return True
+
+    # ================= WebUI 更新接口 =================
+
+    # 这些字段变更会影响定时注册，更新后需要重载调度器
+    _RESCHEDULE_KEYS = {"schedule", "cron", "enabled"}
+
+    _UPDATABLE_FIELDS = {
+        "enabled",
+        "priority",
+        "scope",
+        "keywords",
+        "probability",
+        "cron",
+        "duration",
+        "times",
+        "content",
+        "inject_position",
+        "cooldown",
+        "schedule",
+    }
+
+    def update_entry_fields(self, name: str, fields: dict[str, Any]) -> LoreEntry | None:
+        """
+        批量更新条目字段（WebUI 使用）
+
+        - 只接受白名单内字段，name 不可改
+        - 更新后保持 entry_storage 同步并落盘
+        - schedule / cron / enabled 变更会触发调度器重载
+        """
+        entry = self.entry_map.get(name)
+        if not entry:
+            return None
+
+        for key, value in (fields or {}).items():
+            if key not in self._UPDATABLE_FIELDS:
+                continue
+            if key == "keywords":
+                entry.set_keywords([str(k) for k in (value or []) if str(k).strip()])
+            elif key == "priority":
+                entry.set_priority(int(value))
+            elif key == "cooldown":
+                entry.cooldown = max(0, int(value or 0))
+            elif key == "probability":
+                entry.probability = float(value or 0)
+            elif key == "scope":
+                entry.scope = [str(s) for s in (value or [])]
+            elif key == "schedule":
+                entry.set_schedule(value)
+            else:
+                setattr(entry, key, value)
+
+        self._save_config()
+        if self._RESCHEDULE_KEYS & set(fields or {}):
+            self._emit_changed()
+        return entry
 
     # ================= 读取文件 =================
 

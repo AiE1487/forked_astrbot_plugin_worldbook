@@ -19,6 +19,68 @@ class LoreFile:
     # === 内部工具 ===
 
     @staticmethod
+    def _convert_sillytavern(raw: Any) -> list[dict[str, Any]] | None:
+        """
+        识别酒馆 SillyTavern Lorebook 格式（entries 为按索引的对象）并转换为本插件格式。
+
+        字段映射：
+        - comment/name -> name
+        - key/keys     -> keywords
+        - content      -> content
+        - disable      -> enabled（取反）
+        - probability  -> probability（酒馆为 0-100，>1 时除以 100）
+        - constant     -> 常驻条目（resident 模板，不依赖触发词）
+        """
+        if not (isinstance(raw, dict) and isinstance(raw.get("entries"), dict)):
+            return None
+
+        entries: list[dict[str, Any]] = []
+        for item in raw["entries"].values():
+            if not isinstance(item, dict):
+                continue
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            name = (
+                str(item.get("comment") or item.get("name") or "").strip()
+                or "未命名条目"
+            )
+            keys = item.get("key") or item.get("keys") or []
+            keywords = [str(k).strip() for k in keys if str(k).strip()]
+            disable = item.get("disable")
+            enabled = (not disable) if isinstance(disable, bool) else True
+            constant = bool(item.get("constant"))
+            probability = item.get("probability", item.get("prob", 100))
+            try:
+                probability = float(probability)
+                if probability > 1:
+                    probability = probability / 100
+            except (TypeError, ValueError):
+                probability = 1.0
+
+            entries.append(
+                {
+                    "template": "resident" if constant else "common",
+                    "name": name,
+                    "enabled": enabled,
+                    "keywords": keywords or ([name] if not constant else []),
+                    "content": content,
+                    "probability": probability,
+                }
+            )
+
+        # 酒馆条目名可能重复（comment 常为空），兜底保证唯一
+        seen: set[str] = set()
+        for entry in entries:
+            base, candidate, idx = entry["name"], entry["name"], 2
+            while candidate in seen:
+                candidate = f"{base}({idx})"
+                idx += 1
+            seen.add(candidate)
+            entry["name"] = candidate
+        return entries
+
+    @staticmethod
     def _load_raw(path: Path) -> Any:
         suffix = path.suffix.lower()
         try:
@@ -48,6 +110,12 @@ class LoreFile:
             raise FileNotFoundError(path)
 
         data = LoreFile._load_raw(path)
+
+        # 兼容酒馆 SillyTavern Lorebook 格式（entries 为按索引的对象）
+        st_entries = LoreFile._convert_sillytavern(data)
+        if st_entries is not None:
+            logger.info(f"[lorefile] 识别为酒馆 Lorebook 格式，共 {len(st_entries)} 条")
+            return st_entries
 
         # 兼容：
         # - list[dict]

@@ -9,7 +9,17 @@ from typing import Any
 from astrbot.api import logger
 
 from .config import ConfigNode
+from .schedule import (
+    ScheduleConfig,
+    describe_schedule,
+    is_empty_schedule,
+    normalize_schedule_dict,
+    parse_cron_to_schedule,
+)
 from .template import Template
+
+# 注入位置：default 表示跟随全局 inject_position 配置
+INJECT_POSITIONS = ("default", "system_prompt", "user_input")
 
 
 class LoreEntry(ConfigNode):
@@ -28,10 +38,21 @@ class LoreEntry(ConfigNode):
     content: str
     duration: int
     times: int
+    inject_position: str
+    cooldown: int
+    schedule: ScheduleConfig
 
     def __init__(self, data: dict):
         # 兼容旧版配置
         data.setdefault("cron", "")
+        data.setdefault("inject_position", "default")
+        data.setdefault("cooldown", 0)
+
+        # 结构化定时：为空且存在旧 cron 时自动转换；否则规范化清洗
+        if is_empty_schedule(data.get("schedule")) and data.get("cron"):
+            data["schedule"] = parse_cron_to_schedule(str(data["cron"]))
+        else:
+            data["schedule"] = normalize_schedule_dict(data.get("schedule"))
 
         super().__init__(data)
         # 模板
@@ -70,7 +91,29 @@ class LoreEntry(ConfigNode):
             "content": self.content,
             "duration": self.duration,
             "times": self.times,
+            "inject_position": self.inject_position,
+            "cooldown": self.cooldown,
+            "schedule": self.raw_schedule(),
         }
+
+    def raw_schedule(self) -> dict[str, Any]:
+        """schedule 底层 dict 的拷贝（用于序列化）"""
+        raw = self._data.get("schedule")
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    def set_schedule(self, value: Any) -> None:
+        """
+        整体替换 schedule 配置（规范化后写回底层 dict，保持 dict 身份不变）
+        """
+        normalized = normalize_schedule_dict(value)
+        raw = self._data.get("schedule")
+        if not isinstance(raw, dict):
+            raw = {}
+            self._data["schedule"] = raw
+        raw.clear()
+        raw.update(normalized)
+        # 子视图缓存失效，下次访问按新数据重建
+        self._children.pop("schedule", None)
 
     def add_scope(self, scope: str) -> bool:
         """Add a scope if it does not already exist."""
@@ -189,11 +232,46 @@ class LoreEntry(ConfigNode):
         return len(str(self.cron).split()) == 5
 
     @property
+    def schedule_enabled(self) -> bool:
+        """是否启用定时触发（结构化 schedule 或高级 cron 模式）"""
+        if not self.enabled:
+            return False
+        mode = self.schedule.mode
+        if mode == "cron":
+            return self.enabled_cron
+        return self.schedule.has_trigger()
+
+    @property
+    def cooldown_seconds(self) -> int:
+        """触发冷却秒数（0 表示不冷却）"""
+        try:
+            return max(0, int(self.cooldown or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def resolved_inject_position(self, global_position: str = "user_input") -> str:
+        """
+        解析最终注入位置
+
+        - inject_position == "default" 时跟随全局配置
+        - 非法值回退为 user_input
+        """
+        position = str(self.inject_position or "default").strip()
+        if position == "default":
+            position = global_position or "user_input"
+        if position not in ("system_prompt", "user_input"):
+            logger.warning(
+                f"[条目:{self.name}] 未知的注入位置 {position!r}，已回退为 user_input"
+            )
+            position = "user_input"
+        return position
+
+    @property
     def in_cron_window(self) -> bool:
         """
-        是否处于 cron 激活窗口内
+        是否处于定时激活窗口内（结构化 schedule 与高级 cron 共用）
         """
-        if not self.enabled_cron:
+        if not self.schedule_enabled:
             return False
         if self._cron_fired_at is None:
             return False
@@ -338,17 +416,17 @@ class LoreEntry(ConfigNode):
         记录一次使用（注入消耗）
 
         说明:
-        - 每次注入 system_prompt 后调用
+        - 每次注入后调用（无论注入 system_prompt 还是用户输入）
         - 仅影响运行期次数统计
         """
         self._inject_count += 1
 
     def on_cron_triggered(self) -> None:
         """
-        被 cron 触发，打开一次全局激活窗口
+        被定时任务触发（结构化 schedule / 高级 cron），打开一次全局激活窗口
         """
         self._cron_fired_at = time.time()
-        logger.debug(f"[cron] 条目 {self.name} cron 已触发，等待消息激活")
+        logger.debug(f"[schedule] 条目 {self.name} 定时已触发，等待消息激活")
 
     # ==================================================
     # 展示
@@ -413,8 +491,23 @@ class LoreEntry(ConfigNode):
             lines.append(f"- 正则触发:  {keywords_text}")
 
         # ===== 定时规则（有就展示）=====
-        if self.cron:
-            lines.append(f"- 定时触发:  {self.cron}")
+        schedule_text = describe_schedule(self.schedule, self.cron)
+        if schedule_text:
+            lines.append(f"- 定时触发:  {schedule_text}")
+        elif self.cron:
+            lines.append(f"- 定时触发:  cron {self.cron}")
+
+        # ===== 注入位置 / 触发冷却 =====
+        position_text = {
+            "system_prompt": "System Prompt 末尾",
+            "user_input": "用户消息末尾",
+        }.get(self.inject_position, "跟随全局")
+        lines.append(f"- 注入位置:  {position_text}")
+
+        if self.cooldown_seconds > 0:
+            lines.append(
+                f"- 触发冷却:  {self.format_duration(self.cooldown_seconds)}（激活后冷却期内不再激活）"
+            )
 
         lines.extend(
             [

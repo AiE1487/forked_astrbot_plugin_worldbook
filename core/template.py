@@ -50,6 +50,8 @@ class Template(str, Enum):
             "duration": 180,
             "times": 5,
             "probability": 1,
+            "inject_position": "default",
+            "cooldown": 0,
         }
 
         overrides: dict[Template, dict[str, Any]] = {
@@ -69,7 +71,14 @@ class Template(str, Enum):
             },
             Template.SCHEDULE: {
                 "priority": 80,
-                "cron": "0 0 * * *",
+                "schedule": {
+                    "mode": "daily",
+                    "times": ["00:00"],
+                    "weekdays": [],
+                    "start_date": "",
+                    "end_date": "",
+                    "day_filter": "all",
+                },
                 "duration": 86400,
                 "times": 1,
             },

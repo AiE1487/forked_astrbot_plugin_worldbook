@@ -111,6 +111,7 @@ class ConfigNode:
 class PluginConfig(ConfigNode):
     max_inject_count: int
     allow_same_priority: bool
+    inject_position: str
     entry_storage: list[dict[str, Any]]
 
     _plugin_name = "astrbot_plugin_worldbook"
