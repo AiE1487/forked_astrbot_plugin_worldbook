@@ -2,15 +2,6 @@
 
 const bridge = window.AstrBotPluginPage;
 
-const TEMPLATE_LABELS = {
-  default: "通用",
-  common: "常用",
-  resident: "常驻",
-  chance: "随机",
-  schedule: "日程",
-  group: "群聊",
-  user: "用户",
-};
 const POSITION_LABELS = {
   default: "跟随全局",
   system_prompt: "System Prompt 末尾",
@@ -21,7 +12,7 @@ const WEEKDAY_LABELS = ["周一", "周二", "周三", "周四", "周五", "周�
 const state = {
   entries: [],
   meta: null,
-  editingName: null, // null=列表页；"__new__"=新建；其他=条目名
+  editingName: null, // null=列表页；"__new__"=新建；其他=条目名（原名称，用于改名比对）
 };
 
 // ================= 工具 =================
@@ -102,25 +93,61 @@ async function loadEntries() {
   renderList();
 }
 
+// ================= 示范场景 =================
+
+// 触发描述：不再展示裸 .* 正则，给出可读话术
+function triggerText(entry) {
+  const kws = (entry.keywords || []).filter((k) => k !== ".*");
+  if (kws.length) {
+    return `当检测到「${kws.slice(0, 3).join("」「")}」时`;
+  }
+  if ((entry.keywords || []).includes(".*")) {
+    const scopeAll = entry.scope || [];
+    const ids = scopeAll.filter((s) => s !== "admin");
+    if (scopeAll.includes("admin") && !ids.length) return "当管理员发言时";
+    if (ids.length) return `当 ${ids.slice(0, 3).join("、")} 相关会话有消息时`;
+    return "对所有消息可触发，";
+  }
+  if (entry.schedule_enabled) return "定时触发时";
+  return "未配置触发方式，";
+}
+
+function exampleLine(entry) {
+  const pos = POSITION_LABELS[resolvePosition(entry)] || "用户消息末尾";
+  const text = triggerText(entry);
+  // 话术末尾已带逗号的接「将注入到」，否则用「，将注入到」衔接
+  const sep = /[,，]$/.test(text) ? "" : "，";
+  let html = `${escapeHtml(text)}${sep}将注入到 <b>${pos}</b>`;
+  if (entry.cooldown > 0) html += `，触发冷却 ${fmtDuration(entry.cooldown)}`;
+  if (entry.schedule_enabled && entry.next_fires && entry.next_fires.length) {
+    html += `<span class="fire">下一次执行日期：${escapeHtml(entry.next_fires[0])}${
+      entry.schedule_text ? "（" + escapeHtml(entry.schedule_text) + "）" : ""
+    }</span>`;
+  }
+  return html;
+}
+
 // ================= 列表渲染 =================
 
 function currentFilters() {
   return {
     q: $("search").value.trim().toLowerCase(),
-    template: $("filter-template").value,
     enabled: $("filter-enabled").value,
     position: $("filter-position").value,
   };
 }
 
 function entryMatchesFilters(entry, f) {
-  if (f.template && entry.template !== f.template) return false;
   if (f.enabled === "on" && !entry.enabled) return false;
   if (f.enabled === "off" && entry.enabled) return false;
   if (f.position && (entry.inject_position || "default") !== f.position) return false;
   if (f.q) {
-    const hay = [entry.name, ...(entry.keywords || []), entry.content || ""]
-      .join("\n").toLowerCase();
+    const hay = [
+      entry.name,
+      ...(entry.keywords || []),
+      ...(entry.scope || []),
+      entry.content || "",
+    ].join("\n").toLowerCase();
     if (!hay.includes(f.q)) return false;
   }
   return true;
@@ -138,22 +165,16 @@ function renderList() {
 
   list.innerHTML = items.map((entry) => {
     const pos = resolvePosition(entry);
-    const kws = (entry.keywords || []).slice(0, 4).map((k) =>
+    const kws = (entry.keywords || []).filter((k) => k !== ".*").slice(0, 4).map((k) =>
       `<span class="kw-chip">${escapeHtml(k)}</span>`).join("");
-    const moreKw = (entry.keywords || []).length > 4
-      ? `<span class="kw-chip">…共 ${(entry.keywords || []).length} 条</span>` : "";
+    const moreKw = (entry.keywords || []).filter((k) => k !== ".*").length > 4
+      ? `<span class="kw-chip">…</span>` : "";
 
-    // 示范场景
-    const triggerPart = (entry.keywords || []).length
-      ? `当检测到「${(entry.keywords || []).slice(0, 3).join("」「")}」时`
-      : (entry.schedule_enabled ? "定时触发时" : "未配置触发方式");
-    const example =
-      `${escapeHtml(triggerPart)}，将注入到 <b>${POSITION_LABELS[pos] || pos}</b>` +
-      (entry.cooldown > 0 ? `，触发冷却 ${fmtDuration(entry.cooldown)}` : "");
-    const fireLine = entry.schedule_enabled
-      ? `<span class="fire">下一次执行日期：${(entry.next_fires && entry.next_fires[0]) || "—"}${
-          entry.next_fires && entry.next_fires.length > 1
-            ? `（之后还有 ${entry.next_fires.length - 1} 次）` : ""}</span>`
+    const scopeAll = entry.scope || [];
+    const scopeChips = scopeAll.length
+      ? `<div class="kw-chips"><span class="muted small">生效范围：</span>${
+          scopeAll.slice(0, 4).map((s) => `<span class="kw-chip scope">${escapeHtml(s)}</span>`).join("")}${
+          scopeAll.length > 4 ? `<span class="kw-chip">…共 ${scopeAll.length} 项</span>` : ""}</div>`
       : "";
 
     const runtime = entry.runtime || {};
@@ -162,11 +183,9 @@ function renderList() {
           runtime.remaining_times == null ? "∞" : runtime.remaining_times + "次"}</span>`
       : "";
 
-    const scopeCount = (entry.scope || []).length;
     return `<div class="entry-card card" data-name="${escapeHtml(entry.name)}">
       <div class="entry-head">
         <span class="entry-name">${escapeHtml(entry.name)}</span>
-        <span class="badge">${TEMPLATE_LABELS[entry.template] || entry.template}</span>
         <span class="badge pos">${POSITION_LABELS[entry.inject_position || "default"]}</span>
         ${entry.enabled ? "" : '<span class="badge off">已禁用</span>'}
         ${live}
@@ -176,13 +195,14 @@ function renderList() {
         <span>时长 ${entry.duration > 0 ? fmtDuration(entry.duration) : "永久"}</span>
         <span>次数 ${entry.times > 0 ? entry.times + " 次" : "不限"}</span>
         <span>概率 ${Math.round((entry.probability || 1) * 100)}%</span>
-        ${scopeCount ? `<span>范围 ${scopeCount} 项</span>` : ""}
         ${entry.schedule_text ? `<span>定时：${escapeHtml(entry.schedule_text)}</span>` : ""}
       </div>
       ${kws || moreKw ? `<div class="kw-chips">${kws}${moreKw}</div>` : ""}
-      <div class="example-line">${example}${fireLine}</div>
+      ${scopeChips}
+      <div class="example-line">${exampleLine(entry)}</div>
       <div class="entry-actions">
         <button class="btn" data-act="edit">编辑</button>
+        <button class="btn" data-act="toggle">${entry.enabled ? "禁用" : "启用"}</button>
         <button class="btn danger" data-act="delete">删除</button>
       </div>
     </div>`;
@@ -190,14 +210,76 @@ function renderList() {
 
   list.querySelectorAll(".entry-card").forEach((card) => {
     const name = card.getAttribute("data-name");
+    const entry = state.entries.find((e) => e.name === name);
     card.querySelector('[data-act="edit"]').onclick = () => openModal(name);
-    card.querySelector('[data-act="delete"]').onclick = () => deleteEntry(name);
+    card.querySelector('[data-act="toggle"]').onclick = () => toggleEntry(entry);
+    card.querySelector('[data-act="delete"]').onclick = () => {
+      openConfirm(
+        `确定删除条目「${name}」？此操作不可恢复。`,
+        async () => {
+          await apiPost("entries/delete", { name });
+          toast("已删除");
+          await loadEntries();
+        },
+      );
+    };
   });
+}
+
+// ================= 确认弹窗（沙盒 iframe 禁用 window.confirm，必须用页面内弹窗） =================
+
+let confirmAction = null;
+
+function openConfirm(text, onOk, okLabel) {
+  $("confirm-text").textContent = text;
+  $("confirm-ok").textContent = okLabel || "确认";
+  confirmAction = onOk;
+  $("confirm-mask").classList.remove("hidden");
+}
+
+function closeConfirm() {
+  $("confirm-mask").classList.add("hidden");
+  confirmAction = null;
+}
+
+async function toggleEntry(entry) {
+  try {
+    await apiPost("entries/save", {
+      name: entry.name,
+      fields: { enabled: !entry.enabled },
+    });
+    toast(entry.enabled ? "已禁用" : "已启用");
+    await loadEntries();
+  } catch (e) {
+    toast("操作失败: " + e.message, true);
+  }
 }
 
 // ================= 编辑弹窗 =================
 
+function scheduleToggleOn() {
+  return $("f-schedule-enabled").checked;
+}
+
+function currentSpan() {
+  const el = document.querySelector('input[name="trigger_span"]:checked');
+  return el ? el.value : "moment";
+}
+
 function currentScheduleFromForm() {
+  if (!scheduleToggleOn()) {
+    return {
+      mode: "none",
+      times: [],
+      weekdays: [],
+      start_date: "",
+      end_date: "",
+      day_filter: "all",
+      all_day: false,
+      time_start: "",
+      time_end: "",
+    };
+  }
   return {
     mode: $("f-mode").value,
     times: [...document.querySelectorAll("#times-list input")].map((i) => i.value),
@@ -206,14 +288,32 @@ function currentScheduleFromForm() {
     start_date: $("f-start-date").value || "",
     end_date: $("f-end-date").value || "",
     day_filter: (document.querySelector('input[name="day_filter"]:checked') || {}).value || "all",
+    all_day: currentSpan() === "all_day",
+    time_start: currentSpan() === "range" ? ($("f-range-start").value || "") : "",
+    time_end: currentSpan() === "range" ? ($("f-range-end").value || "") : "",
   };
 }
 
 function refreshSchedulePanels() {
+  const on = scheduleToggleOn();
+  $("schedule-config").classList.toggle("hidden", !on);
+  $("schedule-off-hint").classList.toggle("hidden", on);
+  if (!on) return;
+
   const mode = $("f-mode").value;
-  $("mode-times").classList.toggle("hidden", !(mode === "daily" || mode === "weekly"));
+  const structural = mode === "daily" || mode === "weekly";
+  const span = currentSpan();
+  $("mode-span").classList.toggle("hidden", !structural);
+  $("mode-times").classList.toggle("hidden", !(structural && span === "moment"));
+  $("mode-allday").classList.toggle("hidden", !(structural && span === "all_day"));
+  $("mode-range").classList.toggle("hidden", !(structural && span === "range"));
   $("mode-weekdays").classList.toggle("hidden", mode !== "weekly");
-  $("mode-cron").classList.toggle("hidden", mode !== "cron");
+}
+
+function setSpan(span) {
+  const el = document.querySelector(`input[name="trigger_span"][value="${span}"]`);
+  if (el) el.checked = true;
+  refreshSchedulePanels();
 }
 
 function addTimeInput(value) {
@@ -248,9 +348,11 @@ function renderWeekdayBoxes(selected) {
   });
 }
 
-function fillScheduleForm(schedule, cron) {
+function fillScheduleForm(schedule) {
   const s = schedule || {};
-  $("f-mode").value = s.mode || "none";
+  const enabled = !!s.mode && s.mode !== "none";
+  $("f-schedule-enabled").checked = enabled;
+  $("f-mode").value = s.mode === "weekly" ? "weekly" : "daily";
   $("times-list").innerHTML = "";
   (s.times && s.times.length ? s.times : ["09:00"]).forEach(addTimeInput);
   renderWeekdayBoxes(s.weekdays);
@@ -260,22 +362,24 @@ function fillScheduleForm(schedule, cron) {
   document.querySelectorAll('input[name="day_filter"]').forEach((r) => {
     r.checked = r.value === filter;
   });
-  $("f-cron").value = cron || "";
+  if (enabled) {
+    setSpan(s.all_day ? "all_day" : (s.time_start && s.time_end ? "range" : "moment"));
+    $("f-range-start").value = s.time_start || "09:00";
+    $("f-range-end").value = s.time_end || "22:00";
+  }
   $("schedule-describe").textContent = "";
   $("preview-fires").innerHTML = "";
   refreshSchedulePanels();
 }
 
 function openModal(name) {
-  state.editingName = name || "__new__";
   const isNew = name === null || name === undefined;
+  state.editingName = isNew ? "__new__" : name;
   const entry = isNew ? null : state.entries.find((e) => e.name === name);
 
   $("modal-title").textContent = isNew ? "新建条目" : `编辑条目：${name}`;
   $("f-name").value = isNew ? "" : name;
-  $("f-name").disabled = !isNew;
-  $("f-template").value = entry ? entry.template || "default" : "default";
-  $("f-template").disabled = !isNew;
+  $("f-name").disabled = false; // 名称允许修改（保存时自动重命名）
   $("f-enabled").checked = entry ? entry.enabled !== false : true;
   $("f-priority").value = entry ? entry.priority : 50;
   $("f-probability").value = entry ? entry.probability : 1;
@@ -288,7 +392,7 @@ function openModal(name) {
   $("f-content").value = entry ? entry.content || "" : "";
   $("save-msg").textContent = "";
 
-  fillScheduleForm(entry ? entry.schedule : null, entry ? entry.cron : "");
+  fillScheduleForm(entry ? entry.schedule : null);
   updateExampleLine();
   $("modal-mask").classList.remove("hidden");
 }
@@ -304,20 +408,26 @@ function updateExampleLine() {
     : $("f-position").value;
   const kws = $("f-keywords").value.split("\n").map((s) => s.trim()).filter(Boolean);
   const schedule = currentScheduleFromForm();
-  const trigger = kws.length
-    ? `当检测到「${kws.slice(0, 3).join("」「")}」时`
-    : (schedule.mode !== "none" ? "定时触发时" : "未配置触发方式");
+  const fake = {
+    keywords: kws,
+    scope: $("f-scope").value.split("\n").map((s) => s.trim()).filter(Boolean),
+    schedule_enabled: schedule.mode !== "none",
+    cooldown: Number($("f-cooldown").value) || 0,
+    next_fires: [],
+    schedule_text: "",
+  };
+  const text = triggerText(fake);
+  const sep = /[,，]$/.test(text) ? "" : "，";
   $("f-example").innerHTML =
-    `${escapeHtml(trigger)}，将注入到 <b>${POSITION_LABELS[pos] || pos}</b>`;
+    `${escapeHtml(text)}${sep}将注入到 <b>${POSITION_LABELS[pos] || pos}</b>`;
 }
 
 async function previewSchedule() {
   const schedule = currentScheduleFromForm();
-  const cron = $("f-cron").value.trim();
   $("schedule-describe").textContent = "计算中…";
   $("preview-fires").innerHTML = "";
   try {
-    const data = await apiPost("schedule/preview", { schedule, cron, count: 5 });
+    const data = await apiPost("schedule/preview", { schedule, count: 5 });
     $("schedule-describe").textContent = data.describe || "（未配置定时）";
     $("preview-fires").innerHTML = (data.fires || []).map((f) => `<li>${escapeHtml(f)}</li>`).join("");
     if (!(data.fires || []).length) {
@@ -338,7 +448,6 @@ function collectForm() {
     scope,
     keywords,
     probability: Number($("f-probability").value),
-    cron: $("f-cron").value.trim(),
     duration: Math.max(0, Number($("f-duration").value) || 0),
     times: Math.max(0, Number($("f-times").value) || 0),
     content: $("f-content").value,
@@ -351,14 +460,25 @@ function collectForm() {
 async function saveEntry() {
   const name = $("f-name").value.trim();
   if (!name) { toast("条目名称不能为空", true); return; }
-  if (state.editingName === "__new__" && name.length > 20) {
-    toast("条目名称过长", true);
+  if (name.length > 20) {
+    toast("条目名称过长（不超过 20 字符）", true);
     return;
   }
   const payload = { name, fields: collectForm() };
-  if (state.editingName === "__new__") {
-    payload.template = $("f-template").value;
+  const isEditing = state.editingName !== "__new__";
+  if (isEditing) {
+    payload.original_name = state.editingName;
+    if (name !== state.editingName) {
+      openConfirm(`确定将条目「${state.editingName}」重命名为「${name}」？`, async () => {
+        await submitSave(payload);
+      }, "重命名并保存");
+      return;
+    }
   }
+  await submitSave(payload);
+}
+
+async function submitSave(payload) {
   try {
     await apiPost("entries/save", payload);
     toast("已保存");
@@ -367,17 +487,6 @@ async function saveEntry() {
   } catch (e) {
     $("save-msg").textContent = e.message;
     toast("保存失败: " + e.message, true);
-  }
-}
-
-async function deleteEntry(name) {
-  if (!confirm(`确定删除条目「${name}」？此操作不可恢复。`)) return;
-  try {
-    await apiPost("entries/delete", { name });
-    toast("已删除");
-    await loadEntries();
-  } catch (e) {
-    toast("删除失败: " + e.message, true);
   }
 }
 
@@ -394,15 +503,87 @@ async function saveGlobal() {
   }
 }
 
+// ================= 导入 / 导出 =================
+
+function exportStamp() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+async function exportLorebook() {
+  const filename = `worldbook_${exportStamp()}.json`;
+  try {
+    await bridge.download("export", {}, filename);
+    toast("已开始下载 " + filename);
+  } catch (e) {
+    toast("导出失败: " + e.message, true);
+  }
+}
+
+// 待导入的文件（选择后暂存，等用户在策略弹窗里选择）
+let pendingImportFile = null;
+
+function pickImportFile() {
+  $("import-file").click();
+}
+
+function openImportDialog(file) {
+  pendingImportFile = file;
+  $("import-text").textContent =
+    `已选择「${file.name}」。文件中与现有条目同名的条目，要如何处理？` +
+    `（跳过＝保留现有配置；覆盖＝用文件内容替换现有条目）`;
+  $("import-mask").classList.remove("hidden");
+}
+
+function closeImportDialog() {
+  $("import-mask").classList.add("hidden");
+  pendingImportFile = null;
+}
+
+async function doImport(overwrite) {
+  const file = pendingImportFile;
+  if (!file) return;
+  closeImportDialog();
+  try {
+    const endpoint = overwrite ? "import/overwrite" : "import";
+    const data = await bridge.upload(endpoint, file);
+    const parts = [`已导入 ${(data.imported || []).length} 条`];
+    if ((data.skipped || []).length) parts.push(`跳过同名 ${data.skipped.length} 条`);
+    if ((data.invalid || []).length) parts.push(`无效 ${data.invalid.length} 条`);
+    toast(parts.join("，"));
+    if ((data.invalid || []).length) {
+      console.warn("[worldbook] 导入时跳过的无效条目:", data.invalid);
+    }
+    await loadEntries();
+  } catch (e) {
+    toast("导入失败: " + e.message, true);
+  }
+}
+
 // ================= 事件绑定 & 启动 =================
 
 function bindEvents() {
-  ["search", "filter-template", "filter-enabled", "filter-position"].forEach((id) => {
+  ["search", "filter-enabled", "filter-position"].forEach((id) => {
     $(id).addEventListener("input", renderList);
     $(id).addEventListener("change", renderList);
   });
   $("btn-refresh").onclick = loadEntries;
   $("btn-new").onclick = () => openModal(null);
+  $("btn-export").onclick = exportLorebook;
+  $("btn-import").onclick = pickImportFile;
+  $("import-file").onchange = () => {
+    const file = $("import-file").files[0];
+    // 立即重置 value，保证同一文件可再次选择
+    $("import-file").value = "";
+    if (file) openImportDialog(file);
+  };
+  $("import-cancel").onclick = closeImportDialog;
+  $("import-skip").onclick = () => doImport(false);
+  $("import-overwrite").onclick = () => doImport(true);
+  $("import-mask").addEventListener("click", (e) => {
+    if (e.target === $("import-mask")) closeImportDialog();
+  });
   $("modal-close").onclick = closeModal;
   $("modal-mask").addEventListener("click", (e) => {
     if (e.target === $("modal-mask")) closeModal();
@@ -410,10 +591,34 @@ function bindEvents() {
   $("btn-save").onclick = saveEntry;
   $("save-global").onclick = saveGlobal;
 
+  // 确认弹窗
+  $("confirm-cancel").onclick = closeConfirm;
+  $("confirm-ok").onclick = async () => {
+    const action = confirmAction;
+    closeConfirm();
+    if (action) {
+      try {
+        await action();
+      } catch (e) {
+        toast("操作失败: " + e.message, true);
+      }
+    }
+  };
+  $("confirm-mask").addEventListener("click", (e) => {
+    if (e.target === $("confirm-mask")) closeConfirm();
+  });
+
+  $("f-schedule-enabled").onchange = () => {
+    refreshSchedulePanels();
+    updateExampleLine();
+  };
   $("f-mode").onchange = refreshSchedulePanels;
+  document.querySelectorAll('input[name="trigger_span"]').forEach((r) => {
+    r.addEventListener("change", refreshSchedulePanels);
+  });
   $("btn-add-time").onclick = () => addTimeInput();
   $("btn-preview").onclick = previewSchedule;
-  ["f-keywords", "f-position"].forEach((id) => {
+  ["f-keywords", "f-position", "f-scope", "f-cooldown"].forEach((id) => {
     $(id).addEventListener("input", updateExampleLine);
     $(id).addEventListener("change", updateExampleLine);
   });
@@ -426,6 +631,13 @@ async function init() {
     return;
   }
   bindEvents();
+  // 导入导出依赖宿主 bridge 的文件通道（旧版 AstrBot 可能缺失）
+  if (typeof bridge.upload !== "function" || typeof bridge.download !== "function") {
+    $("btn-import").disabled = true;
+    $("btn-export").disabled = true;
+    $("btn-import").title = "当前 AstrBot 版本不支持页面文件上传，请升级宿主";
+    $("btn-export").title = "当前 AstrBot 版本不支持页面文件下载，请升级宿主";
+  }
   try {
     await bridge.ready();
   } catch (e) {

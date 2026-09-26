@@ -142,6 +142,23 @@ class LoreEditor:
 
         yield event.plain_result(f"条目【{name}】优先级已设置为 {priority}")
 
+    async def rename_entry(self, event: AstrMessageEvent):
+        """重命名条目 <旧名称> <新名称>"""
+        parts = event.message_str.split()
+        if len(parts) != 3:
+            yield event.plain_result("用法：重命名条目 旧名称 新名称")
+            return
+
+        old_name, new_name = parts[1], parts[2]
+        ok, err = self.lorebook.rename_entry(old_name, new_name)
+        if not ok:
+            yield event.plain_result(err)
+            return
+
+        # 会话中已激活的副本与冷却记录同步改名
+        self.sessions.rename_everywhere(old_name, new_name)
+        yield event.plain_result(f"条目已重命名：{old_name} → {new_name}")
+
     # ================= 会话态命令 =================
 
     async def enable_entry(self, event: AstrMessageEvent):

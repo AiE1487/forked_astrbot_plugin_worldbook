@@ -1,29 +1,39 @@
-/* pages/manager/style.css — 世界书 WebUI 管理页 */
+/* pages/manager/style.css — 世界书 WebUI 管理页（水墨暗色 · 夜间友好） */
 
+/*
+ * 配色说明：类水墨屏风格 —— 近黑灰底 + 灰白文字 + 低饱和墨青强调，
+ * 全局单一暗色主题，无刺眼纯白，适合夜间长时间使用。
+ */
 :root {
-  --bg: #f5f6f8;
-  --card: #ffffff;
-  --text: #24292f;
-  --muted: #6a737d;
-  --border: #e1e4e8;
-  --primary: #2f6fed;
-  --primary-weak: #e8f0fe;
-  --danger: #d73a49;
-  --ok: #22863a;
-  --shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  --bg: #111315;
+  --card: #191c1e;
+  --input-bg: #1e2225;
+  --text: #c8cdd1;
+  --muted: #7f878d;
+  --border: #2b3034;
+  --primary: #7d99a6;
+  --primary-strong: #54707d;
+  --primary-weak: #20262a;
+  --danger: #b06a6a;
+  --ok: #7ea68c;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
 }
 
+/* 兼容宿主可能注入的主题标记：统一保持水墨暗色 */
+html[data-theme="light"],
 html[data-theme="dark"] {
-  --bg: #16181d;
-  --card: #1f2229;
-  --text: #e6e8eb;
-  --muted: #8b949e;
-  --border: #30363d;
-  --primary: #4c8dff;
-  --primary-weak: #1c2a44;
-  --danger: #f85149;
-  --ok: #3fb950;
-  --shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --bg: #111315;
+  --card: #191c1e;
+  --input-bg: #1e2225;
+  --text: #c8cdd1;
+  --muted: #7f878d;
+  --border: #2b3034;
+  --primary: #7d99a6;
+  --primary-strong: #54707d;
+  --primary-weak: #20262a;
+  --danger: #b06a6a;
+  --ok: #7ea68c;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
 }
 
 * { box-sizing: border-box; }
@@ -39,7 +49,7 @@ body {
 
 #app { max-width: 1080px; margin: 0 auto; }
 
-h1 { font-size: 20px; margin: 0 0 4px; }
+h1 { font-size: 20px; margin: 0 0 4px; color: #dde3e7; }
 h3 { margin: 0 0 10px; font-size: 14px; color: var(--primary); }
 
 .muted { color: var(--muted); }
@@ -83,7 +93,7 @@ h3 { margin: 0 0 10px; font-size: 14px; color: var(--primary); }
 .toolbar input[type="search"] { flex: 1; min-width: 180px; }
 
 input, select, textarea {
-  background: var(--card);
+  background: var(--input-bg);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -92,8 +102,11 @@ input, select, textarea {
   font-family: inherit;
   outline: none;
 }
+input::placeholder, textarea::placeholder { color: #5c646a; }
 input:focus, select:focus, textarea:focus { border-color: var(--primary); }
 textarea { resize: vertical; width: 100%; }
+select { color-scheme: dark; }
+input[type="date"], input[type="time"] { color-scheme: dark; }
 
 .btn {
   background: var(--card);
@@ -107,12 +120,13 @@ textarea { resize: vertical; width: 100%; }
 }
 .btn:hover { border-color: var(--primary); color: var(--primary); }
 .btn.primary {
-  background: var(--primary);
-  border-color: var(--primary);
-  color: #fff;
+  background: var(--primary-strong);
+  border-color: var(--primary-strong);
+  color: #f2f5f6;
 }
-.btn.primary:hover { opacity: 0.88; color: #fff; }
+.btn.primary:hover { background: var(--primary); border-color: var(--primary); color: #101315; }
 .btn.danger { color: var(--danger); }
+.btn.danger:hover { border-color: var(--danger); color: var(--danger); }
 .btn.small { padding: 4px 10px; font-size: 12px; }
 .btn.icon { padding: 4px 8px; }
 
@@ -131,7 +145,7 @@ textarea { resize: vertical; width: 100%; }
   gap: 8px;
   flex-wrap: wrap;
 }
-.entry-name { font-size: 15px; font-weight: 600; }
+.entry-name { font-size: 15px; font-weight: 600; color: #dde3e7; }
 
 .badge {
   font-size: 11px;
@@ -147,13 +161,18 @@ textarea { resize: vertical; width: 100%; }
 
 .entry-meta { color: var(--muted); font-size: 12px; display: flex; gap: 12px; flex-wrap: wrap; }
 
-.kw-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.kw-chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .kw-chip {
   background: var(--primary-weak);
   color: var(--primary);
   border-radius: 6px;
   padding: 2px 8px;
   font-size: 12px;
+}
+.kw-chip.scope {
+  background: transparent;
+  border: 1px dashed var(--border);
+  color: var(--muted);
 }
 
 .example-line {
@@ -173,7 +192,7 @@ textarea { resize: vertical; width: 100%; }
 .modal-mask {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.45);
+  background: rgba(0, 0, 0, 0.62);
   display: flex;
   align-items: flex-start;
   justify-content: center;
@@ -197,7 +216,7 @@ textarea { resize: vertical; width: 100%; }
   padding: 14px 18px;
   border-bottom: 1px solid var(--border);
 }
-.modal-header h2 { margin: 0; font-size: 16px; }
+.modal-header h2 { margin: 0; font-size: 16px; color: #dde3e7; }
 .modal-body { padding: 14px 18px; overflow-y: auto; display: flex; flex-direction: column; gap: 18px; }
 .modal-footer {
   display: flex;
@@ -221,12 +240,20 @@ textarea { resize: vertical; width: 100%; }
   font-size: 12px;
   color: var(--muted);
 }
-.form-grid label.check {
+/* 行内开关（启用条目 / 启用定时触发）：横排、文字与控件同行 */
+.form-grid label.check, .form-section > label.check {
   flex-direction: row;
   align-items: center;
   gap: 8px;
   font-size: 13px;
   color: var(--text);
+}
+input[type="checkbox"], input[type="radio"] {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  flex: none;
+  accent-color: var(--primary-strong);
 }
 
 .sub-panel {
@@ -250,6 +277,7 @@ textarea { resize: vertical; width: 100%; }
   cursor: pointer;
   font-size: 12px;
   user-select: none;
+  color: var(--muted);
 }
 .weekday-boxes label.on {
   background: var(--primary-weak);
@@ -271,20 +299,38 @@ textarea { resize: vertical; width: 100%; }
 }
 .preview-fires { margin: 0; padding-left: 20px; line-height: 1.9; font-size: 13px; }
 
+/* ===== 确认弹窗 ===== */
+.confirm-box {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  width: min(360px, 92%);
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: var(--shadow);
+  margin-top: 20vh;
+}
+.confirm-title { font-size: 15px; font-weight: 600; color: #dde3e7; }
+.confirm-text { font-size: 13px; color: var(--muted); line-height: 1.6; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 10px; }
+
 /* ===== Toast ===== */
 .toast {
   position: fixed;
   bottom: 24px;
   left: 50%;
   transform: translateX(-50%);
-  background: var(--text);
-  color: var(--bg);
+  background: #262b2e;
+  color: var(--text);
+  border: 1px solid var(--border);
   padding: 9px 18px;
   border-radius: 8px;
   font-size: 13px;
   z-index: 200;
   box-shadow: var(--shadow);
 }
-.toast.error { background: var(--danger); color: #fff; }
+.toast.error { background: var(--danger); border-color: var(--danger); color: #101315; }
 
 .empty-tip { text-align: center; color: var(--muted); padding: 40px 0; }

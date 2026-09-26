@@ -26,16 +26,6 @@
 
     <div class="toolbar">
       <input id="search" type="search" placeholder="搜索名称 / 触发词…">
-      <select id="filter-template">
-        <option value="">全部模板</option>
-        <option value="default">通用</option>
-        <option value="common">常用</option>
-        <option value="resident">常驻</option>
-        <option value="chance">随机</option>
-        <option value="schedule">日程</option>
-        <option value="group">群聊</option>
-        <option value="user">用户</option>
-      </select>
       <select id="filter-enabled">
         <option value="">全部状态</option>
         <option value="on">仅启用</option>
@@ -48,12 +38,17 @@
         <option value="user_input">用户消息</option>
       </select>
       <span class="spacer"></span>
+      <button id="btn-import" class="btn">⬆ 导入</button>
+      <button id="btn-export" class="btn">⬇ 导出</button>
       <button id="btn-refresh" class="btn">刷新</button>
       <button id="btn-new" class="btn primary">＋ 新建条目</button>
     </div>
 
     <div id="entry-list" class="entry-list"></div>
   </div>
+
+  <!-- 导入用的隐藏文件选择器（点击「导入」按钮触发） -->
+  <input id="import-file" type="file" accept=".json,.yaml,.yml" class="hidden">
 
   <!-- 编辑弹窗 -->
   <div id="modal-mask" class="modal-mask hidden">
@@ -63,29 +58,30 @@
         <button id="modal-close" class="btn icon">✕</button>
       </div>
       <div class="modal-body">
+        <!-- ① 条目名称 + 注入内容 -->
         <section class="form-section">
           <h3>基础</h3>
+          <label>条目名称（唯一标识，可用于命令管理与搜索）
+            <input id="f-name" type="text" maxlength="20" placeholder="条目唯一名称">
+          </label>
+          <label>注入内容（条目触发后注入给模型的内容，支持 {user_name} {time} 等通配符）
+            <textarea id="f-content" rows="6" placeholder="条目生效时注入给模型的内容"></textarea>
+          </label>
+          <label class="check"><input id="f-enabled" type="checkbox"> 启用条目（总开关）</label>
+        </section>
+
+        <!-- ② 触发几率 / 冷却 / 生命周期等 -->
+        <section class="form-section">
+          <h3>触发与生效</h3>
+          <label>触发词 / 正则（每行一条，消息命中任意一条即触发；留空则不通过消息触发）
+            <textarea id="f-keywords" rows="3" placeholder="示例&#10;关键词&#10;^正则表达式$"></textarea>
+          </label>
           <div class="form-grid">
-            <label>名称
-              <input id="f-name" type="text" maxlength="20" placeholder="条目唯一名称">
-            </label>
-            <label>模板
-              <select id="f-template">
-                <option value="default">通用</option>
-                <option value="common">常用</option>
-                <option value="resident">常驻</option>
-                <option value="chance">随机</option>
-                <option value="schedule">日程</option>
-                <option value="group">群聊</option>
-                <option value="user">用户</option>
-              </select>
-            </label>
-            <label>优先级（越小越先）
-              <input id="f-priority" type="number" step="1">
-            </label>
-            <label class="check"><input id="f-enabled" type="checkbox"> 启用条目</label>
-            <label>生效概率（0~1）
+            <label>触发几率（0~1，1=必定生效）
               <input id="f-probability" type="number" min="0" max="1" step="0.01">
+            </label>
+            <label>触发冷却（秒，0=不冷却）
+              <input id="f-cooldown" type="number" min="0" step="60">
             </label>
             <label>生效时长（秒，0=永久）
               <input id="f-duration" type="number" min="0" step="1">
@@ -93,86 +89,127 @@
             <label>生效次数（0=不限）
               <input id="f-times" type="number" min="0" step="1">
             </label>
-            <label>触发冷却（秒，0=不冷却）
-              <input id="f-cooldown" type="number" min="0" step="60">
+            <label>优先级（越小越先注入）
+              <input id="f-priority" type="number" step="1">
+            </label>
+            <label>注入位置
+              <select id="f-position">
+                <option value="default">跟随全局</option>
+                <option value="user_input">用户消息末尾（缓存友好，推荐）</option>
+                <option value="system_prompt">System Prompt 末尾</option>
+              </select>
             </label>
           </div>
-          <label>触发词 / 正则（每行一条）
-            <textarea id="f-keywords" rows="3" placeholder="示例&#10;关键词&#10;^正则表达式$"></textarea>
-          </label>
-          <label>生效范围（每行一条：会话ID / 群号 / 用户ID / admin，留空=不限制）
+          <label>生效范围（每行一条：用户ID / 群号 / 会话ID / admin，留空=所有会话生效）
             <textarea id="f-scope" rows="2"></textarea>
-          </label>
-          <label>注入位置
-            <select id="f-position">
-              <option value="default">跟随全局</option>
-              <option value="user_input">用户消息末尾（缓存友好，推荐）</option>
-              <option value="system_prompt">System Prompt 末尾</option>
-            </select>
-          </label>
-          <label>注入内容
-            <textarea id="f-content" rows="6" placeholder="条目生效时注入给模型的内容，支持 {user_name} {time} 等通配符"></textarea>
           </label>
           <div id="f-example" class="example-line"></div>
         </section>
 
+        <!-- ③ 定时触发（不启用时不展开后续配置） -->
         <section class="form-section">
-          <h3>定时设置（可视化）</h3>
-          <div class="form-grid">
-            <label>定时模式
-              <select id="f-mode">
-                <option value="none">不定时</option>
-                <option value="daily">每天</option>
-                <option value="weekly">每周（按星期）</option>
-                <option value="cron">自定义 cron（高级）</option>
-              </select>
-            </label>
-          </div>
+          <h3>定时触发</h3>
+          <label class="check"><input id="f-schedule-enabled" type="checkbox"> 启用定时触发（到点后进入可激活窗口）</label>
+          <div class="muted small" id="schedule-off-hint">未启用定时触发。启用后可配置每天 / 每周的定时注入规则。</div>
 
-          <div id="mode-times" class="sub-panel hidden">
-            <div class="panel-title">触发时刻</div>
-            <div id="times-list" class="times-list"></div>
-            <button id="btn-add-time" class="btn small">＋ 添加时刻</button>
-          </div>
-
-          <div id="mode-weekdays" class="sub-panel hidden">
-            <div class="panel-title">生效星期</div>
-            <div id="weekday-boxes" class="weekday-boxes"></div>
-          </div>
-
-          <div id="mode-cron" class="sub-panel hidden">
-            <div class="panel-title">cron 表达式（分 时 日 月 周）</div>
-            <input id="f-cron" type="text" placeholder="例：0 9 * * 1-5（周一至五 每天9点）">
-          </div>
-
-          <div class="form-grid">
-            <label>起始日期（可选）
-              <input id="f-start-date" type="date">
-            </label>
-            <label>结束日期（可选）
-              <input id="f-end-date" type="date">
-            </label>
-          </div>
-          <div class="sub-panel">
-            <div class="panel-title">日期类型过滤</div>
-            <div class="radio-row" id="day-filter-boxes">
-              <label class="radio"><input type="radio" name="day_filter" value="all" checked> 全部日期</label>
-              <label class="radio"><input type="radio" name="day_filter" value="workday"> 仅工作日</label>
-              <label class="radio"><input type="radio" name="day_filter" value="holiday"> 仅节假日/周末</label>
+          <div id="schedule-config" class="hidden">
+            <div class="form-grid">
+              <label>定时模式
+                <select id="f-mode">
+                  <option value="daily">每天</option>
+                  <option value="weekly">每周（按星期）</option>
+                </select>
+              </label>
             </div>
-            <div id="holiday-hint" class="muted small"></div>
-          </div>
 
-          <div class="preview-box">
-            <button id="btn-preview" class="btn">▶ 预览未来执行</button>
-            <div id="schedule-describe" class="muted"></div>
-            <ol id="preview-fires" class="preview-fires"></ol>
+            <div id="mode-span" class="sub-panel hidden">
+              <div class="panel-title">触发方式</div>
+              <div class="radio-row">
+                <label class="radio"><input type="radio" name="trigger_span" value="moment" checked> 时刻触发</label>
+                <label class="radio"><input type="radio" name="trigger_span" value="all_day"> 全天触发</label>
+                <label class="radio"><input type="radio" name="trigger_span" value="range"> 时间段触发</label>
+              </div>
+            </div>
+
+            <div id="mode-times" class="sub-panel hidden">
+              <div class="panel-title">触发时刻</div>
+              <div id="times-list" class="times-list"></div>
+              <button id="btn-add-time" class="btn small">＋ 添加时刻</button>
+            </div>
+
+            <div id="mode-allday" class="sub-panel hidden">
+              <div class="panel-title">全天触发</div>
+              <div class="muted small">当天 00:00 起整天可激活。只想在「某一天」全天触发：把下方起始/结束日期设为同一天即可。</div>
+            </div>
+
+            <div id="mode-range" class="sub-panel hidden">
+              <div class="panel-title">触发时间段</div>
+              <div class="times-list">
+                <label class="time-item">开始 <input id="f-range-start" type="time" value="09:00"></label>
+                <label class="time-item">结束 <input id="f-range-end" type="time" value="22:00"></label>
+              </div>
+              <div class="muted small">到达开始时刻后可激活，至结束时刻为止；支持跨天（如 22:00 ~ 02:00）。</div>
+            </div>
+
+            <div id="mode-weekdays" class="sub-panel hidden">
+              <div class="panel-title">生效星期</div>
+              <div id="weekday-boxes" class="weekday-boxes"></div>
+            </div>
+
+            <div class="form-grid">
+              <label>起始日期（可选）
+                <input id="f-start-date" type="date">
+              </label>
+              <label>结束日期（可选）
+                <input id="f-end-date" type="date">
+              </label>
+            </div>
+            <div class="sub-panel">
+              <div class="panel-title">日期类型过滤</div>
+              <div class="radio-row" id="day-filter-boxes">
+                <label class="radio"><input type="radio" name="day_filter" value="all" checked> 全部日期</label>
+                <label class="radio"><input type="radio" name="day_filter" value="workday"> 仅工作日</label>
+                <label class="radio"><input type="radio" name="day_filter" value="holiday"> 仅节假日/周末</label>
+              </div>
+              <div id="holiday-hint" class="muted small"></div>
+            </div>
+
+            <div class="preview-box">
+              <button id="btn-preview" class="btn">▶ 预览未来执行</button>
+              <div id="schedule-describe" class="muted"></div>
+              <ol id="preview-fires" class="preview-fires"></ol>
+            </div>
           </div>
         </section>
       </div>
       <div class="modal-footer">
         <span id="save-msg" class="muted"></span>
         <button id="btn-save" class="btn primary">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 确认弹窗（沙盒 iframe 内 window.confirm 不可用，必须用页面内弹窗） -->
+  <div id="confirm-mask" class="modal-mask hidden">
+    <div class="confirm-box">
+      <div class="confirm-title" id="confirm-title">确认操作</div>
+      <div class="confirm-text" id="confirm-text"></div>
+      <div class="confirm-actions">
+        <button id="confirm-cancel" class="btn">取消</button>
+        <button id="confirm-ok" class="btn primary">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 导入策略弹窗：同名条目的处理方式 -->
+  <div id="import-mask" class="modal-mask hidden">
+    <div class="confirm-box">
+      <div class="confirm-title">导入世界书</div>
+      <div class="confirm-text" id="import-text"></div>
+      <div class="confirm-actions">
+        <button id="import-cancel" class="btn">取消</button>
+        <button id="import-skip" class="btn">跳过同名</button>
+        <button id="import-overwrite" class="btn primary">覆盖同名</button>
       </div>
     </div>
   </div>

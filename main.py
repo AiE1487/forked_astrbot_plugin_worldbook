@@ -16,7 +16,6 @@ from .core.entry import LoreEntry
 from .core.lorebook import Lorebook
 from .core.scheduler import LoreCronScheduler
 from .core.session import SessionCache
-from .core.share import LorebookShare
 from .core.wildcard import WildcardResolver
 
 
@@ -40,7 +39,6 @@ class WorldBookPlugin(Star):
 
         self.cfg = PluginConfig(config)
         self.lorebook = Lorebook(self.cfg)
-        self.share = LorebookShare(self.lorebook, self.cfg)
         self.sessions = SessionCache(self.cfg)
         self.style = None
         self.cron = LoreCronScheduler(self.lorebook, self.sessions)
@@ -103,7 +101,7 @@ class WorldBookPlugin(Star):
         content: str,
         keywords: str = "",
     ) -> str:
-        """Add a common worldbook entry.
+        """Add a worldbook entry.
 
         This can be used for lightweight memory, reusable rules, project or
         character context, user preferences, and compact summaries.
@@ -149,7 +147,6 @@ class WorldBookPlugin(Star):
             trigger_keywords = [name]
 
         data = {
-            "template": "common",
             "name": name,
             "keywords": trigger_keywords,
             "content": content,
@@ -185,6 +182,13 @@ class WorldBookPlugin(Star):
         async for msg in self.editor.set_priority(event):
             await event.send(msg)
 
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("重命名条目")
+    async def rename_entry(self, event: AstrMessageEvent):
+        """重命名条目 <旧名称> <新名称>"""
+        async for msg in self.editor.rename_entry(event):
+            await event.send(msg)
+
     # ================= 会话态命令 =================
 
     @filter.permission_type(PermissionType.ADMIN)
@@ -213,20 +217,6 @@ class WorldBookPlugin(Star):
         async for msg in self.editor.clear_entries(event):
             await event.send(msg)
 
-    # ================= 文件流通 =================
-
-    @filter.permission_type(PermissionType.ADMIN)
-    @filter.command("导出世界书")
-    async def upload_lorebook(self, event: AstrMessageEvent, name: str | None = None):
-        async for msg in self.share.upload_lorebook(event, name):
-            yield msg
-
-    @filter.permission_type(PermissionType.ADMIN)
-    @filter.command("导入世界书")
-    async def import_lorebook(self, event: AstrMessageEvent):
-        async for msg in self.share.download_lorebook(event):
-            yield msg
-
     # ================= 核心机制 =================
 
     @filter.on_llm_request()
@@ -253,6 +243,23 @@ class WorldBookPlugin(Star):
 
         # Step 2：使用会话中的条目
         self._consume_entries(event, req, umo)
+
+    @staticmethod
+    def _build_extra_part(text: str):
+        """
+        构造本轮注入的内容块（extra_user_content_parts 通道）
+
+        - 优先 TextPart.mark_as_temp()：随本轮用户消息一并发给模型（位于用户
+          发言之后 = 请求末尾，system_prompt 与历史前缀保持稳定，前缀缓存友好），
+          且宿主保存会话历史时会剔除该块（_no_save），不污染聊天历史
+        - 旧宿主无 TextPart 时回退为 dict（与 v2.3.0 行为一致）
+        """
+        try:
+            from astrbot.core.agent.message import TextPart
+
+            return TextPart(text=text).mark_as_temp()
+        except Exception:
+            return {"type": "text", "text": text}
 
     def _clean_history_blocks(self, req: ProviderRequest) -> None:
         """
@@ -289,7 +296,9 @@ class WorldBookPlugin(Star):
 
         职责：
         - 遍历所有可用的 LoreEntry
-        - 通过 LoreEntry.can_activate 做统一判决
+        - 通过 LoreEntry.check_activate 做统一判决
+        - 通过会话级触发冷却过滤
+        - 消费定时激活窗口（在冷却检查之后）
         - 将通过判决的条目写入 Session
         """
 
@@ -301,7 +310,7 @@ class WorldBookPlugin(Star):
 
         for e in self.lorebook.entries:
             # 所有是否“允许进入会话”的判断
-            # 必须统一由 LoreEntry.can_activate 给出
+            # 必须统一由 LoreEntry.check_activate 给出
             if not e.check_activate(
                 text=msg,
                 user_id=uid,
@@ -320,6 +329,10 @@ class WorldBookPlugin(Star):
                         f"[条目:{e.name}] 触发冷却中，剩余 {int(remaining)} 秒，跳过激活"
                     )
                     continue
+
+            # 定时窗口消费必须在冷却检查之后：
+            # 若先消费再被冷却拦下，定时条目当天/该时段将无法再次触发
+            e.consume_cron_window(text=msg)
 
             candidates.append(e)
 
@@ -421,8 +434,8 @@ class WorldBookPlugin(Star):
             extra_parts = getattr(req, "extra_user_content_parts", None)
             if extra_parts is not None:
                 # 宿主的本轮临时内容通道：随本轮用户消息一并发给模型，但不落盘到
-                # 会话历史，历史与缓存前缀保持稳定
-                extra_parts.append({"type": "text", "text": envelope})
+                # 会话历史（mark_as_temp），历史与缓存前缀保持稳定
+                extra_parts.append(self._build_extra_part(envelope))
                 logger.debug("世界书注入通道：extra_user_content_parts（不落盘）")
             else:
                 # 旧版本宿主无此字段，回退为追加用户输入（会随会话历史保存）

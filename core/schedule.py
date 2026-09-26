@@ -5,7 +5,7 @@
 组成：
 - ScheduleConfig   : 条目 schedule 字段的强类型视图（mode/times/weekdays/日期范围/节假日过滤）
 - HolidayProvider  : 中国法定节假日/工作日判断（chinese-calendar 离线优先 + timor.tech 在线兜底 + 磁盘缓存）
-- parse_cron_to_schedule : 旧 5 段 cron 表达式 → 结构化配置（尽力转换，转不了的保留为 mode=cron）
+- parse_cron_to_schedule : 旧 5 段 cron 表达式 → 结构化配置（尽力转换，转不了的保留为 mode=cron + expr）
 - next_fire_times  : 计算未来 N 个触发时刻（WebUI「下一次执行日期」与可视化预览）
 """
 from __future__ import annotations
@@ -118,6 +118,13 @@ def normalize_schedule_dict(raw: Any) -> dict[str, Any]:
             weekdays.append(value)
     weekdays.sort()
 
+    def _norm_time(value: Any) -> str:
+        parsed = parse_time_hhmm(value)
+        if parsed is None:
+            return ""
+        hh, mm = parsed
+        return f"{hh:02d}:{mm:02d}"
+
     day_filter = str(raw.get("day_filter") or "all").strip().lower()
     if day_filter not in DAY_FILTERS:
         day_filter = "all"
@@ -129,6 +136,11 @@ def normalize_schedule_dict(raw: Any) -> dict[str, Any]:
         "start_date": parse_date_iso(raw.get("start_date")),
         "end_date": parse_date_iso(raw.get("end_date")),
         "day_filter": day_filter,
+        "all_day": bool(raw.get("all_day", False)),
+        "time_start": _norm_time(raw.get("time_start")),
+        "time_end": _norm_time(raw.get("time_end")),
+        # mode=cron 时的原始 5 段 cron 表达式（旧版独立 cron 字段的迁移归属）
+        "expr": str(raw.get("expr") or "").strip(),
     }
 
 
@@ -233,10 +245,10 @@ def parse_cron_to_schedule(cron_expr: str) -> dict[str, Any]:
     """
     把 5 段 cron 表达式尽力转换为结构化 schedule。
 
-    转换不了的（指定 日/月、步长、过复杂的组合）保留为 mode=cron 原样使用。
+    转换不了的（指定 日/月、步长、过复杂的组合）保留为 mode=cron，表达式存入 expr。
     返回值经过 normalize_schedule_dict 补全全部字段。
     """
-    result: dict[str, Any] = {"mode": "cron"}
+    result: dict[str, Any] = {"mode": "cron", "expr": str(cron_expr or "").strip()}
     fields = str(cron_expr or "").split()
     if len(fields) == 5:
         minute_field, hour_field, dom_field, month_field, dow_field = fields
@@ -253,7 +265,7 @@ def parse_cron_to_schedule(cron_expr: str) -> dict[str, Any]:
                     else:
                         result = {"mode": "weekly", "times": times, "weekdays": weekdays}
         except Exception:
-            result = {"mode": "cron"}
+            result = {"mode": "cron", "expr": str(cron_expr or "").strip()}
     return normalize_schedule_dict(result)
 
 
@@ -393,33 +405,127 @@ class ScheduleConfig(ConfigNode):
     """
     条目 schedule 字段的强类型视图
 
-    - mode        : none / daily / weekly / cron（cron=高级模式，表达式存在条目 cron 字段）
-    - times       : 触发时刻列表 HH:MM（daily/weekly）
+    - mode        : none / daily / weekly / cron（cron=旧数据兼容模式，表达式存 expr）
+    - expr        : mode=cron 时的原始 5 段 cron 表达式（旧版独立 cron 字段已并入此处）
+    - times       : 触发时刻列表 HH:MM（daily/weekly 的「时刻触发」方式）
     - weekdays    : 星期列表，1=周一 ... 7=周日（weekly）
     - start_date  : 起始日期 YYYY-MM-DD，空=不限（所有模式通用）
     - end_date    : 结束日期 YYYY-MM-DD，空=不限
     - day_filter  : all / workday / holiday（节假日过滤，所有模式通用）
+    - all_day     : 全天触发（当天 00:00 起整天可激活）
+    - time_start/time_end : 触发时间段 HH:MM（支持跨天，如 22:00~02:00）
     """
 
     mode: str
+    expr: str
     times: list[str]
     weekdays: list[int]
     start_date: str
     end_date: str
     day_filter: str
+    all_day: bool
+    time_start: str
+    time_end: str
+
+    # ---- 触发方式 ----
+
+    def trigger_span(self) -> str:
+        """
+        daily/weekly 的触发方式：all_day=全天 / range=时间段 / moment=时刻列表
+
+        优先级：全天 > 时间段 > 时刻列表；时间段要求起止有效且不同。
+        """
+        if self.mode not in ("daily", "weekly"):
+            return "moment"
+        if self.all_day:
+            return "all_day"
+        if (
+            self.time_start
+            and self.time_end
+            and self.time_start != self.time_end
+        ):
+            return "range"
+        return "moment"
+
+    def fire_times_of_day(self) -> list[str]:
+        """当天实际的触发时刻（全天=00:00；时间段=开始时刻；时刻=times）"""
+        span = self.trigger_span()
+        if span == "all_day":
+            return ["00:00"]
+        if span == "range":
+            return [self.time_start]
+        return sorted(set(self.times))
+
+    def activation_window_seconds(self, fired_at: float) -> float | None:
+        """
+        定时开窗的有效时长（秒）；None 表示沿用条目 duration
+
+        - 全天：至当日 24 点（次日零点）
+        - 时间段：结束 - 开始（跨天自动 +24 小时）
+        - 时刻：None（沿用条目 duration）
+        """
+        span = self.trigger_span()
+        if span == "all_day":
+            fired = datetime.fromtimestamp(fired_at)
+            next_midnight = datetime.combine(
+                fired.date() + timedelta(days=1), dtime(0, 0)
+            )
+            return max(60.0, (next_midnight - fired).total_seconds())
+        if span == "range":
+            sh, sm = parse_time_hhmm(self.time_start) or (0, 0)
+            eh, em = parse_time_hhmm(self.time_end) or (0, 0)
+            minutes = (eh * 60 + em) - (sh * 60 + sm)
+            if minutes <= 0:
+                minutes += 24 * 60  # 跨天时间段，如 22:00~02:00
+            return float(minutes * 60)
+        return None
+
+    def in_span_now(self, now: datetime | None = None) -> bool:
+        """当前时刻是否处于触发方式覆盖的时间范围内（全天恒真，仅时间段做时刻判断）"""
+        span = self.trigger_span()
+        if span == "all_day":
+            return True
+        if span != "range":
+            return False
+
+        now = now or datetime.now()
+        cur = now.hour * 60 + now.minute
+        sh, sm = parse_time_hhmm(self.time_start) or (0, 0)
+        eh, em = parse_time_hhmm(self.time_end) or (0, 0)
+        start, end = sh * 60 + sm, eh * 60 + em
+        if start < end:
+            return start <= cur < end
+        # 跨天时间段：如 22:00~02:00
+        return cur >= start or cur < end
 
     def has_trigger(self) -> bool:
         """结构化配置本身是否可触发（不含 cron 模式，cron 由条目的 enabled_cron 判断）"""
-        if self.mode == "daily":
-            return bool(self.times)
-        if self.mode == "weekly":
-            return bool(self.times) and bool(self.weekdays)
-        return False
+        if self.mode not in ("daily", "weekly"):
+            return False
+        if self.mode == "weekly" and not self.weekdays:
+            return False
+        if self.trigger_span() in ("all_day", "range"):
+            return True
+        return bool(self.times)
+
+    # ---- 日期校验 ----
+
+    def _match_range_weekday(self, d: date, *, check_weekday: bool) -> bool:
+        """日期范围 + 星期约束（ISO 字符串可直接字典序比较）"""
+        ds = d.isoformat()
+        if self.start_date and ds < self.start_date:
+            return False
+        if self.end_date and ds > self.end_date:
+            return False
+        if check_weekday and self.mode == "weekly" and self.weekdays:
+            if d.isoweekday() not in self.weekdays:
+                return False
+        return True
 
     async def matches_date(
         self,
         d: date,
-        holiday: HolidayProvider,
+        holiday: "HolidayProvider",
         *,
         check_weekday: bool = True,
     ) -> bool:
@@ -428,18 +534,8 @@ class ScheduleConfig(ConfigNode):
 
         - weekly 模式默认校验星期；cron 模式星期由表达式负责，调用方传 check_weekday=False
         """
-        ds = d.isoformat()
-
-        # 日期范围（ISO 字符串可直接字典序比较）
-        if self.start_date and ds < self.start_date:
+        if not self._match_range_weekday(d, check_weekday=check_weekday):
             return False
-        if self.end_date and ds > self.end_date:
-            return False
-
-        # 星期约束（仅 weekly 模式）
-        if check_weekday and self.mode == "weekly" and self.weekdays:
-            if d.isoweekday() not in self.weekdays:
-                return False
 
         # 节假日 / 工作日过滤
         if self.day_filter == "workday":
@@ -448,17 +544,53 @@ class ScheduleConfig(ConfigNode):
             return await holiday.is_holiday(d)
         return True
 
+    def matches_date_sync(
+        self,
+        d: date,
+        holiday: "HolidayProvider",
+        *,
+        check_weekday: bool = True,
+    ) -> bool:
+        """
+        同步版日期校验（启动追赶用）
 
-def describe_schedule(schedule: ScheduleConfig, cron: str) -> str:
+        节假日仅用离线数据，超出覆盖范围按自然周估算（周一至周五=工作日）。
+        """
+        if not self._match_range_weekday(d, check_weekday=check_weekday):
+            return False
+
+        if self.day_filter in ("workday", "holiday"):
+            offline = holiday.offline_workday(d)
+            want_workday = self.day_filter == "workday"
+            if offline is None:
+                offline = d.weekday() < 5
+            return offline == want_workday
+        return True
+
+
+def describe_schedule(schedule: ScheduleConfig) -> str:
     """把 schedule 转为人类可读描述（展示 / WebUI 用）"""
     mode = schedule.mode
     if mode == "cron":
-        text = f"cron {cron}" if cron else ""
-    elif mode == "daily" and schedule.times:
-        text = "每天 " + "、".join(schedule.times)
-    elif mode == "weekly" and schedule.times and schedule.weekdays:
-        names = "、".join(WEEKDAY_NAMES.get(w, str(w)) for w in schedule.weekdays)
-        text = f"每周{names} " + "、".join(schedule.times)
+        text = f"cron {schedule.expr}" if schedule.expr else ""
+    elif mode in ("daily", "weekly"):
+        span = schedule.trigger_span()
+        if span == "all_day":
+            span_text = "全天"
+        elif span == "range":
+            span_text = f"{schedule.time_start}~{schedule.time_end}"
+        else:
+            span_text = "、".join(schedule.times)
+        if not span_text:
+            return ""
+
+        if mode == "daily":
+            text = f"每天 {span_text}"
+        else:
+            if not schedule.weekdays:
+                return ""
+            names = "、".join(WEEKDAY_NAMES.get(w, str(w)) for w in schedule.weekdays)
+            text = f"每周{names} {span_text}"
     else:
         return ""
 
@@ -478,7 +610,6 @@ def describe_schedule(schedule: ScheduleConfig, cron: str) -> str:
 
 async def next_fire_times(
     schedule: ScheduleConfig,
-    cron: str,
     *,
     count: int = 3,
     holiday: HolidayProvider,
@@ -487,7 +618,8 @@ async def next_fire_times(
     """
     计算未来 N 个触发时刻（本地时区，不含已过去的时刻）
 
-    - daily/weekly：逐日校验日期范围/星期/节假日过滤后拼接时刻
+    - daily/weekly：逐日校验日期范围/星期/节假日过滤后拼接触发时刻
+      （全天=00:00；时间段=开始时刻；时刻=times 列表）
     - cron        ：用 APScheduler CronTrigger 逐个推算，并应用日期范围/节假日过滤
     """
     now = now or datetime.now()
@@ -496,7 +628,7 @@ async def next_fire_times(
 
     if schedule.mode == "cron":
         try:
-            trigger = build_cron_trigger(cron)
+            trigger = build_cron_trigger(schedule.expr)
         except Exception:
             return []
         cursor = now
@@ -518,7 +650,7 @@ async def next_fire_times(
             cursor = nxt + timedelta(minutes=1)
         return results
 
-    times = sorted({t for t in schedule.times if parse_time_hhmm(t)})
+    times = sorted({t for t in schedule.fire_times_of_day() if parse_time_hhmm(t)})
     if not times:
         return []
 

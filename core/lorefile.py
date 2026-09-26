@@ -29,7 +29,7 @@ class LoreFile:
         - content      -> content
         - disable      -> enabled（取反）
         - probability  -> probability（酒馆为 0-100，>1 时除以 100）
-        - constant     -> 常驻条目（resident 模板，不依赖触发词）
+        - constant     -> 常驻条目（对所有消息触发、永久生效、不限次数）
         """
         if not (isinstance(raw, dict) and isinstance(raw.get("entries"), dict)):
             return None
@@ -60,10 +60,11 @@ class LoreFile:
 
             entries.append(
                 {
-                    "template": "resident" if constant else "common",
                     "name": name,
                     "enabled": enabled,
-                    "keywords": keywords or ([name] if not constant else []),
+                    "keywords": [".*"] if constant else (keywords or [name]),
+                    "duration": 0 if constant else 180,
+                    "times": 0 if constant else 5,
                     "content": content,
                     "probability": probability,
                 }

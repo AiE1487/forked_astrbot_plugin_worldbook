@@ -138,6 +138,26 @@ class SessionCache:
                     self._data.pop(umo, None)
         return removed
 
+    def rename_everywhere(self, old_name: str, new_name: str) -> int:
+        """
+        重命名所有会话中的同名激活副本（条目重命名后调用）
+
+        返回改名的副本数量
+        """
+        renamed = 0
+        for entries in self._data.values():
+            for e in entries:
+                if e.name == old_name:
+                    e.name = new_name
+                    renamed += 1
+        # 冷却记录按条目名索引，一并迁移
+        for bucket in self._cooldowns.values():
+            if old_name in bucket:
+                bucket[new_name] = bucket.pop(old_name)
+        if renamed:
+            logger.debug(f"Renamed {renamed} session copies: {old_name} -> {new_name}")
+        return renamed
+
     def refresh_entry(self, name: str, master: LoreEntry) -> None:
         """
         用主条目刷新所有会话中的同名激活副本（保留其运行状态）
@@ -153,6 +173,7 @@ class SessionCache:
                 fresh._activated_at = e._activated_at
                 fresh._inject_count = e._inject_count
                 fresh._cron_fired_at = e._cron_fired_at
+                fresh._cron_window_end = e._cron_window_end
                 entries[idx] = fresh
 
     def clear(self, umo: str) -> None:

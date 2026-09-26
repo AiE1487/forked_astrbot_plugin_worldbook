@@ -16,7 +16,6 @@ from .schedule import (
     normalize_schedule_dict,
     parse_cron_to_schedule,
 )
-from .template import Template
 
 # 注入位置：default 表示跟随全局 inject_position 配置
 INJECT_POSITIONS = ("default", "system_prompt", "user_input")
@@ -34,7 +33,6 @@ class LoreEntry(ConfigNode):
     scope: list[str]
     keywords: list[str]
     probability: float
-    cron: str
     content: str
     duration: int
     times: int
@@ -43,20 +41,36 @@ class LoreEntry(ConfigNode):
     schedule: ScheduleConfig
 
     def __init__(self, data: dict):
-        # 兼容旧版配置
-        data.setdefault("cron", "")
+        # 兼容旧版配置：缺省字段兜底为与 _conf_schema 一致的默认值
+        data.setdefault("enabled", True)
+        data.setdefault("priority", 50)
+        data.setdefault("keywords", [])
+        data.setdefault("scope", [])
+        data.setdefault("duration", 180)
+        data.setdefault("times", 5)
+        data.setdefault("probability", 1.0)
         data.setdefault("inject_position", "default")
         data.setdefault("cooldown", 0)
 
-        # 结构化定时：为空且存在旧 cron 时自动转换；否则规范化清洗
-        if is_empty_schedule(data.get("schedule")) and data.get("cron"):
-            data["schedule"] = parse_cron_to_schedule(str(data["cron"]))
+        # 旧版独立 cron 字段已废弃：转换为结构化 schedule 后从数据中移除
+        legacy_cron = str(data.pop("cron", "") or "").strip()
+        sched = normalize_schedule_dict(data.get("schedule"))
+        if legacy_cron and sched.get("mode") in ("", None, "none"):
+            # schedule 未配置实际触发时，旧 cron 表达式仍有效 → 迁移转换
+            data["schedule"] = parse_cron_to_schedule(legacy_cron)
         else:
-            data["schedule"] = normalize_schedule_dict(data.get("schedule"))
+            # schedule 已配置 cron 模式但缺表达式时，回填旧 cron
+            if sched.get("mode") == "cron" and not sched.get("expr") and legacy_cron:
+                sched["expr"] = legacy_cron
+            data["schedule"] = sched
+
+        # 模板标记：AstrBot 配置面板的 template_list 依赖条目数据上的
+        # template 字段路由渲染表单；v2.6.0 起模板概念废弃，
+        # 统一恒为 default（单一模板，用户不可见，仅作面板渲染路由）
+        data["template"] = "default"
+        data.pop("__template_key", None)
 
         super().__init__(data)
-        # 模板
-        self._template = Template.from_data(data)
 
         # 本条目的激活时间，也是条目进入激发态的标志
         self._activated_at = None
@@ -67,27 +81,30 @@ class LoreEntry(ConfigNode):
         # cron 触发时间
         self._cron_fired_at: float | None = None
 
+        # 定时激活窗口终点（全天/时间段模式由定时配置决定，时刻模式为 None 走 duration）
+        self._cron_window_end: float | None = None
+
         # 编译并缓存正则
         self._compiled_patterns: list[re.Pattern] = []
         self._compile_patterns()
 
     @property
-    def template(self) -> Template:
-        return self._template
+    def template(self) -> str:
+        """已废弃：v2.6.0 起不再区分模板，恒为 default（仅供旧数据展示兜底）"""
+        return "default"
 
     def to_dict(self) -> dict[str, Any]:
         """
         LoreEntry -> lorefile dict
         """
         return {
-            "template": self.template.value,
+            "template": "default",
             "name": self.name,
             "enabled": self.enabled,
             "priority": self.priority,
             "scope": list(self.scope),
             "keywords": list(self.keywords),
             "probability": self.probability,
-            "cron": self.cron,
             "content": self.content,
             "duration": self.duration,
             "times": self.times,
@@ -151,7 +168,7 @@ class LoreEntry(ConfigNode):
     def _compile_patterns(self) -> None:
         """编译正则"""
         self._compiled_patterns.clear()
-        self.keywords = [k for k in self.keywords if k.strip()]
+        self.keywords = [k for k in (self.keywords or []) if k.strip()]
 
         for pattern in self.keywords:
             try:
@@ -226,14 +243,16 @@ class LoreEntry(ConfigNode):
 
     @property
     def enabled_cron(self) -> bool:
-        """是否启用定时任务 (标准 5 段 cron)"""
+        """旧数据兼容：schedule 处于 cron 模式时，表达式是否为合法 5 段格式"""
         if not self.enabled:
             return False
-        return len(str(self.cron).split()) == 5
+        if self.schedule.mode != "cron":
+            return False
+        return len(str(self.schedule.expr).split()) == 5
 
     @property
     def schedule_enabled(self) -> bool:
-        """是否启用定时触发（结构化 schedule 或高级 cron 模式）"""
+        """是否启用了定时触发"""
         if not self.enabled:
             return False
         mode = self.schedule.mode
@@ -275,6 +294,10 @@ class LoreEntry(ConfigNode):
             return False
         if self._cron_fired_at is None:
             return False
+
+        # 全天/时间段模式：窗口终点由定时配置决定（与 duration 无关）
+        if self._cron_window_end is not None:
+            return time.time() <= self._cron_window_end
 
         # duration <= 0 表示永久窗口
         if self.duration <= 0:
@@ -343,6 +366,7 @@ class LoreEntry(ConfigNode):
         统一激活判决, 在监听LLM消息时调用
             - 用于判定条目是否允许“进入 Session”
             - 不代表本次请求一定会注入
+            - 只做判断，不修改任何状态；定时窗口由 consume_cron_window 显式消费
         """
 
         # Gate 1: 总开关
@@ -368,11 +392,22 @@ class LoreEntry(ConfigNode):
         if not self._satisfy_probability():
             return False
 
-        # cron 资格只消费一次，避免在同一窗口内反复重置 duration / times
-        if cron_hit and not text_hit:
-            self._cron_fired_at = None
-
         return True
+
+    def consume_cron_window(self, text: str = "") -> None:
+        """
+        消费定时激活窗口（cron 资格只消费一次）
+
+        由调用方在条目通过全部门槛（含触发冷却）并确定进入会话后调用。
+        旧版在 check_activate 内消费窗口，若条目随后被会话冷却拦下，
+        窗口已被清空，导致定时条目当天/该时段再也无法触发（v2.6.0 修复）。
+
+        - 文本触发与定时同时命中时保留窗口（文本激活本身不依赖窗口）
+        """
+        if text and self._has_text_token(text):
+            return
+        self._cron_fired_at = None
+        self._cron_window_end = None
 
     def allow_consume(
         self,
@@ -423,9 +458,16 @@ class LoreEntry(ConfigNode):
 
     def on_cron_triggered(self) -> None:
         """
-        被定时任务触发（结构化 schedule / 高级 cron），打开一次全局激活窗口
+        被定时任务触发（结构化 schedule / 旧 cron 兼容模式），打开一次全局激活窗口
+
+        - 全天/时间段模式：窗口终点由定时配置决定（全天=当日 24 点，时间段=起点+跨度）
+        - 时刻模式：窗口沿用条目 duration
         """
         self._cron_fired_at = time.time()
+        window = self.schedule.activation_window_seconds(self._cron_fired_at)
+        self._cron_window_end = (
+            self._cron_fired_at + window if window is not None else None
+        )
         logger.debug(f"[schedule] 条目 {self.name} 定时已触发，等待消息激活")
 
     # ==================================================
@@ -491,11 +533,9 @@ class LoreEntry(ConfigNode):
             lines.append(f"- 正则触发:  {keywords_text}")
 
         # ===== 定时规则（有就展示）=====
-        schedule_text = describe_schedule(self.schedule, self.cron)
+        schedule_text = describe_schedule(self.schedule)
         if schedule_text:
             lines.append(f"- 定时触发:  {schedule_text}")
-        elif self.cron:
-            lines.append(f"- 定时触发:  cron {self.cron}")
 
         # ===== 注入位置 / 触发冷却 =====
         position_text = {
